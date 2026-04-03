@@ -9,8 +9,11 @@ project(app C)
 
 # App source files — add your .c files here
 set(APP_SOURCES
-    main/main.c
     main/crt0.c
+    main/main.c
+    main/game.c
+    main/render.c
+    main/audio.c
 )
 
 # Include directories — add paths to your headers here

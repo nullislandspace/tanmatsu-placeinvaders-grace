@@ -1,8 +1,8 @@
 #include <stdio.h>
+#include <string.h>
 #include "bsp/device.h"
 #include "bsp/display.h"
 #include "bsp/input.h"
-#include "bsp/led.h"
 #include "bsp/power.h"
 #include "driver/gpio.h"
 #include "esp_lcd_panel_ops.h"
@@ -10,226 +10,170 @@
 #include "esp_log.h"
 #include "hal/lcd_types.h"
 #include "nvs_flash.h"
-#include "pax_fonts.h"
-#include "pax_gfx.h"
-#include "pax_text.h"
-#include "portmacro.h"
 
-// Constants
-static char const TAG[] = "main";
+#include "game.h"
+#include "render.h"
+#include "audio.h"
 
-// Global variables
+static const char TAG[] = "placeinvaders";
+
 static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
-static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
+static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
 static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
-static pax_buf_t                    fb                   = {0};
 static QueueHandle_t                input_event_queue    = NULL;
 
-#if defined(CONFIG_BSP_TARGET_KAMI)
-// Temporary addition for supporting epaper devices (irrelevant for Tanmatsu)
-static pax_col_t palette[] = {0xffffffff, 0xff000000, 0xffff0000};  // white, black, red
-#endif
-
-void blit(void) {
-    bsp_display_blit(0, 0, display_h_res, display_v_res, pax_buf_get_pixels(&fb));
-}
-
 void app_main(void) {
-    // Start the GPIO interrupt service
+    // GPIO interrupt service
     gpio_install_isr_service(0);
 
-    // Initialize the Non Volatile Storage partition
+    // Initialize NVS
     esp_err_t res = nvs_flash_init();
     if (res == ESP_ERR_NVS_NO_FREE_PAGES || res == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        res = nvs_flash_erase();
-        if (res != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to erase NVS flash: %d", res);
-            return;
-        }
+        ESP_ERROR_CHECK(nvs_flash_erase());
         res = nvs_flash_init();
     }
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize NVS flash: %d", res);
-        return;
-    }
+    ESP_ERROR_CHECK(res);
 
-    // Initialize the Board Support Package
+    // Initialize BSP (request RGB888 for direct framebuffer access)
     const bsp_configuration_t bsp_configuration = {
-        .display =
-            {
-                .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888,
-                .num_fbs                = 1,
-            },
+        .display = {
+            .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888,
+            .num_fbs = 1,
+        },
     };
-    res = bsp_device_initialize(&bsp_configuration);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize BSP: %d", res);
-        return;
-    }
+    ESP_ERROR_CHECK(bsp_device_initialize(&bsp_configuration));
 
-    // Get display parameters and rotation
-    res = bsp_display_get_parameters(&display_h_res, &display_v_res, &display_color_format, &display_data_endian);
-    if (res != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get display parameters: %d", res);
-        return;
-    }
+    // Get display parameters
+    ESP_ERROR_CHECK(bsp_display_get_parameters(
+        &display_h_res, &display_v_res, &display_color_format, &display_data_endian));
 
-    // Convert ESP-IDF color format into PAX buffer type
-    pax_buf_type_t format = PAX_BUF_24_888RGB;
-    switch (display_color_format) {
-        case LCD_COLOR_PIXEL_FORMAT_RGB565:
-            format = PAX_BUF_16_565RGB;
-            break;
-        case LCD_COLOR_PIXEL_FORMAT_RGB888:
-            format = PAX_BUF_24_888RGB;
-            break;
-        default:
-            break;
-    }
+    ESP_LOGI(TAG, "Display: %dx%d", display_h_res, display_v_res);
 
-    // Convert BSP display rotation format into PAX orientation type
-    bsp_display_rotation_t display_rotation = bsp_display_get_default_rotation();
-    pax_orientation_t orientation = PAX_O_UPRIGHT;
-    switch (display_rotation) {
-        case BSP_DISPLAY_ROTATION_90:
-            orientation = PAX_O_ROT_CCW;
-            break;
-        case BSP_DISPLAY_ROTATION_180:
-            orientation = PAX_O_ROT_HALF;
-            break;
-        case BSP_DISPLAY_ROTATION_270:
-            orientation = PAX_O_ROT_CW;
-            break;
-        case BSP_DISPLAY_ROTATION_0:
-        default:
-            orientation = PAX_O_UPRIGHT;
-            break;
-    }
-
-        // Initialize graphics stack
-#if defined(CONFIG_BSP_TARGET_KAMI)
-    // Temporary addition for supporting epaper devices (irrelevant for Tanmatsu)
-    format = PAX_BUF_2_PAL;
-#endif
-    pax_buf_init(&fb, NULL, display_h_res, display_v_res, format);
-    pax_buf_reversed(&fb, display_data_endian == LCD_RGB_DATA_ENDIAN_BIG);
-#if defined(CONFIG_BSP_TARGET_KAMI)
-    // Temporary addition for supporting epaper devices (irrelevant for Tanmatsu)
-    fb.palette      = palette;
-    fb.palette_size = sizeof(palette) / sizeof(pax_col_t);
-#endif
-    pax_buf_set_orientation(&fb, orientation);
-
-#if defined(CONFIG_BSP_TARGET_KAMI)
-#define BLACK 0
-#define WHITE 1
-#define RED   2
-#else
-#define BLACK 0xFF000000
-#define WHITE 0xFFFFFFFF
-#define RED   0xFFFF0000
-#endif
-
-    // Get input event queue from BSP
+    // Get input event queue
     ESP_ERROR_CHECK(bsp_input_get_queue(&input_event_queue));
 
-    // LEDs
-    bsp_led_set_pixel(0, 0xFF0000);  // Red
-    bsp_led_set_pixel(1, 0x00FF00);  // Green
-    bsp_led_set_pixel(2, 0x0000FF);  // Blue
-    bsp_led_set_pixel(3, 0xFFFF00);  // Yellow
-    bsp_led_set_pixel(4, 0x00FFFF);  // Magenta
-    bsp_led_set_pixel(5, 0xFF00FF);  // Cyan
-    bsp_led_send();                  // Send data to the coprocessor
-    bsp_led_set_mode(false);         // Take control over all LEDs by disabling automatic mode
+    // Allocate framebuffer for direct rendering
+    size_t fb_size = display_h_res * display_v_res * 3;  // RGB888
+    uint8_t* framebuffer = heap_caps_malloc(fb_size, MALLOC_CAP_SPIRAM);
+    if (!framebuffer) {
+        ESP_LOGE(TAG, "Failed to allocate framebuffer (%d bytes)", fb_size);
+        return;
+    }
+    memset(framebuffer, 0, fb_size);
 
-    // Main section of the app
+    // Initialize audio
+    audio_init();
 
-    // This example shows how to read from the BSP event queue to read input events
+    // Initialize game
+    game_t game;
+    memset(&game, 0, sizeof(game));
+    game.highscore = highscore_load();
+    game.state = STATE_TITLE;
+    game.frame = 0;
 
-    // If you want to run something at an interval in this same main thread you can replace portMAX_DELAY with an amount
-    // of ticks to wait, for example pdMS_TO_TICKS(1000)
+    // Set up vsync
+    SemaphoreHandle_t te_semaphore = NULL;
+    bsp_display_set_tearing_effect_mode(BSP_DISPLAY_TE_V_BLANKING);
+    bsp_display_get_tearing_effect_semaphore(&te_semaphore);
 
-    pax_background(&fb, WHITE);
-    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Welcome! Press any key to trigger an event.");
-    blit();
+    // Input state tracking
+    bool prev_fire = false;
+
+    ESP_LOGI(TAG, "Starting game loop");
 
     while (1) {
+        // Drain event queue (catch power button, etc.)
         bsp_input_event_t event;
-        if (xQueueReceive(input_event_queue, &event, portMAX_DELAY) == pdTRUE) {
-            switch (event.type) {
-                case INPUT_EVENT_TYPE_KEYBOARD: {
-                    if (event.args_keyboard.ascii != '\b' ||
-                        event.args_keyboard.ascii != '\t') {  // Ignore backspace & tab keyboard events
-                        ESP_LOGI(TAG, "Keyboard event %c (%02x) %s", event.args_keyboard.ascii,
-                                 (uint8_t)event.args_keyboard.ascii, event.args_keyboard.utf8);
-                        pax_simple_rect(&fb, WHITE, 0, 0, pax_buf_get_width(&fb), 72);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 0, "Keyboard event");
-                        char text[64];
-                        snprintf(text, sizeof(text), "ASCII:     %c (0x%02x)", event.args_keyboard.ascii,
-                                 (uint8_t)event.args_keyboard.ascii);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 18, text);
-                        snprintf(text, sizeof(text), "UTF-8:     %s", event.args_keyboard.utf8);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 36, text);
-                        snprintf(text, sizeof(text), "Modifiers: 0x%0" PRIX32, event.args_keyboard.modifiers);
-                        pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 54, text);
-                        blit();
-                    }
-                    break;
-                }
-                case INPUT_EVENT_TYPE_NAVIGATION: {
-                    ESP_LOGI(TAG, "Navigation event %0" PRIX32 ": %s", (uint32_t)event.args_navigation.key,
-                             event.args_navigation.state ? "pressed" : "released");
-
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
-                        bsp_device_restart_to_launcher();
-                    }
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F2) {
-                        bsp_input_set_backlight_brightness(0);
-                    }
-                    if (event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F3) {
-                        bsp_input_set_backlight_brightness(100);
-                    }
-
-                    pax_simple_rect(&fb, WHITE, 0, 100, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 0, "Navigation event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Key:       0x%0" PRIX32, (uint32_t)event.args_navigation.key);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 18, text);
-                    snprintf(text, sizeof(text), "State:     %s", event.args_navigation.state ? "pressed" : "released");
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 36, text);
-                    snprintf(text, sizeof(text), "Modifiers: 0x%0" PRIX32, event.args_navigation.modifiers);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 100 + 54, text);
-                    blit();
-                    break;
-                }
-                case INPUT_EVENT_TYPE_ACTION: {
-                    ESP_LOGI(TAG, "Action event 0x%0" PRIX32 ": %s", (uint32_t)event.args_action.type,
-                             event.args_action.state ? "yes" : "no");
-                    pax_simple_rect(&fb, WHITE, 0, 200 + 0, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 0, "Action event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Type:      0x%0" PRIX32, (uint32_t)event.args_action.type);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 36, text);
-                    snprintf(text, sizeof(text), "State:     %s", event.args_action.state ? "yes" : "no");
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 200 + 54, text);
-                    blit();
-                    break;
-                }
-                case INPUT_EVENT_TYPE_SCANCODE: {
-                    ESP_LOGI(TAG, "Scancode event 0x%0" PRIX32, (uint32_t)event.args_scancode.scancode);
-                    pax_simple_rect(&fb, WHITE, 0, 300 + 0, pax_buf_get_width(&fb), 72);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 300 + 0, "Scancode event");
-                    char text[64];
-                    snprintf(text, sizeof(text), "Scancode:  0x%0" PRIX32, (uint32_t)event.args_scancode.scancode);
-                    pax_draw_text(&fb, BLACK, pax_font_sky_mono, 16, 0, 300 + 36, text);
-                    blit();
-                    break;
-                }
-                default:
-                    break;
+        while (xQueueReceive(input_event_queue, &event, 0) == pdTRUE) {
+            if (event.type == INPUT_EVENT_TYPE_NAVIGATION &&
+                event.args_navigation.key == BSP_INPUT_NAVIGATION_KEY_F1) {
+                bsp_device_restart_to_launcher();
             }
+        }
+
+        // Poll input keys directly
+        bool key_left = false, key_right = false, key_space = false, key_esc = false;
+        bsp_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_LEFT, &key_left);
+        bsp_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_RIGHT, &key_right);
+        bsp_input_read_scancode(BSP_INPUT_SCANCODE_SPACE, &key_space);
+        bsp_input_read_scancode(BSP_INPUT_SCANCODE_ESC, &key_esc);
+
+        // Rising-edge fire detection
+        bool fire = key_space && !prev_fire;
+        prev_fire = key_space;
+
+        // ESC returns to launcher
+        if (key_esc) {
+            bsp_device_restart_to_launcher();
+        }
+
+        // Game state machine
+        switch (game.state) {
+            case STATE_TITLE:
+                game.frame++;
+                if (fire) {
+                    game_init(&game, game.highscore);
+                }
+                render_title_screen(framebuffer, &game);
+                break;
+
+            case STATE_PLAYING:
+                game_update(&game, key_left, key_right, fire);
+                render_game(framebuffer, &game);
+                break;
+
+            case STATE_PLAYER_DEATH:
+                game.frame++;
+                game.anim_timer--;
+                if (game.anim_timer == 0) {
+                    if (game.lives > 0) {
+                        game.state = STATE_PLAYING;
+                        game.player_x = PLAYER_START_X;
+                        for (int i = 0; i < MAX_PLAYER_BULLETS; i++) game.player_bullets[i].active = false;
+                        for (int i = 0; i < MAX_ALIEN_BULLETS; i++) {
+                            game.alien_bullets[i].active = false;
+                        }
+                    } else {
+                        game.state = STATE_GAME_OVER;
+                        if (game.score > game.highscore) {
+                            game.highscore = game.score;
+                            highscore_save(game.score);
+                        }
+                    }
+                }
+                render_game(framebuffer, &game);
+                break;
+
+            case STATE_LEVEL_CLEAR:
+                game.frame++;
+                game.anim_timer--;
+                if (game.anim_timer == 0) {
+                    game.level++;
+                    game_new_wave(&game);
+                    game.state = STATE_PLAYING;
+                }
+                render_game(framebuffer, &game);
+                break;
+
+            case STATE_GAME_OVER:
+                game.frame++;
+                if (fire) {
+                    game.state = STATE_TITLE;
+                }
+                render_game_over(framebuffer, &game);
+                break;
+        }
+
+        // Wait for vsync and blit
+        if (te_semaphore) {
+            xSemaphoreTake(te_semaphore, pdMS_TO_TICKS(50));
+        }
+        bsp_display_blit(0, 0, display_h_res, display_v_res, framebuffer);
+
+        // Target ~30fps if no vsync
+        if (!te_semaphore) {
+            vTaskDelay(pdMS_TO_TICKS(16));
         }
     }
 }
