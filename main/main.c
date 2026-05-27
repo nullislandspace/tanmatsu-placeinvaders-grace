@@ -4,6 +4,7 @@
 #include "bsp/display.h"
 #include "bsp/input.h"
 #include "bsp/power.h"
+#include "gl_input.h"
 #include "driver/gpio.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_types.h"
@@ -19,8 +20,8 @@ static const char TAG[] = "placeinvaders";
 
 static size_t                       display_h_res        = 0;
 static size_t                       display_v_res        = 0;
-static lcd_color_rgb_pixel_format_t display_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
-static lcd_rgb_data_endian_t        display_data_endian  = LCD_RGB_DATA_ENDIAN_LITTLE;
+static bsp_display_color_format_t   display_color_format = BSP_DISPLAY_COLOR_FORMAT_24_888RGB;
+static bsp_display_endianness_t     display_data_endian  = BSP_DISPLAY_ENDIAN_LITTLE;
 static QueueHandle_t                input_event_queue    = NULL;
 
 void app_main(void) {
@@ -38,7 +39,7 @@ void app_main(void) {
     // Initialize BSP (request RGB888 for direct framebuffer access)
     const bsp_configuration_t bsp_configuration = {
         .display = {
-            .requested_color_format = LCD_COLOR_PIXEL_FORMAT_RGB888,
+            .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_24_888RGB,
             .num_fbs = 1,
         },
     };
@@ -50,8 +51,8 @@ void app_main(void) {
 
     ESP_LOGI(TAG, "Display: %dx%d", display_h_res, display_v_res);
 
-    // Get input event queue
-    ESP_ERROR_CHECK(bsp_input_get_queue(&input_event_queue));
+    // Input queue — graceloader merges native + USB keyboard
+    ESP_ERROR_CHECK(gl_input_get_queue(&input_event_queue));
 
     // Allocate framebuffer for direct rendering
     size_t fb_size = display_h_res * display_v_res * 3;  // RGB888
