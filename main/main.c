@@ -95,10 +95,10 @@ void app_main(void) {
 
         // Poll input keys directly
         bool key_left = false, key_right = false, key_space = false, key_esc = false;
-        bsp_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_LEFT, &key_left);
-        bsp_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_RIGHT, &key_right);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_SPACE, &key_space);
-        bsp_input_read_scancode(BSP_INPUT_SCANCODE_ESC, &key_esc);
+        gl_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_LEFT, &key_left);
+        gl_input_read_navigation_key(BSP_INPUT_NAVIGATION_KEY_RIGHT, &key_right);
+        gl_input_read_scancode(BSP_INPUT_SCANCODE_SPACE, &key_space);
+        gl_input_read_scancode(BSP_INPUT_SCANCODE_ESC, &key_esc);
 
         // Rising-edge fire detection
         bool fire = key_space && !prev_fire;
